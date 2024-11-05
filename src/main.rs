@@ -58,7 +58,7 @@ struct SequenceRecord {
 impl SequenceRecord {
     fn print_record(&self) {
         println!(
-            "Record: original_id: {}, assembly_id: {}, sequence_id: {}, start: {}, end: {}, orient: {}, inferred_version: {:?}, validated: {}",
+            "Smitten::Identifier: original_id: {}, assembly_id: {}, sequence_id: {}, start: {}, end: {}, orient: {}, inferred_version: {:?}, validated: {}",
             self.original_id.as_deref().unwrap_or("Unknown"),
             self.assembly_id.as_deref().unwrap_or("None"),
             self.sequence_id,
@@ -238,7 +238,18 @@ fn write_fasta_output(
     };
 
     for record in records {
-        writeln!(writer, ">{}", record.sequence_id)?;
+        // TODO: Use display functionality now
+        let v2_id = if let Some(assembly) = &record.assembly_id {
+            format!("{}:{}", assembly, record.sequence_id)
+        } else {
+            record.sequence_id.clone()
+        };
+        if record.start.is_some() && record.end.is_some() && record.orient.is_some() {
+            writeln!(writer, ">{}:{}-{}_{}", v2_id, record.start.unwrap(), record.end.unwrap(), 
+                    record.orient.unwrap())?;
+        } else {
+            writeln!(writer, ">{}", v2_id)?;
+        }
         writeln!(writer, "{}", String::from_utf8_lossy(&record.sequence))?;
     }
 
@@ -301,7 +312,7 @@ fn validate_sequences(
     let mut fix_counts: HashMap<String, usize> = HashMap::new();
 
     for record in records.iter_mut() {
-        record.print_record();
+        //record.print_record();
 
         let genome_sequence = match genome_map.get(&record.sequence_id) {
             Some(seq) => seq,
@@ -351,7 +362,6 @@ fn validate_sequences(
         //println!("  Working on start {} and end {}", start, end);
         //println!("  Working on fasta_sequence {:?}", fasta_sequence);
         //println!("  Working on genome_sequence {:?}", genome_sequence[start..end].to_vec());
-
 
         // 1. Direct match on same strand
         if start < genome_sequence.len() && end <= genome_sequence.len() {
@@ -435,7 +445,7 @@ fn validate_sequences(
             } else {
                 record.validated = Some(format!("fixed{}",validation_str));
             }
-            println!("Record validated: {:?}", record.validated);
+            //println!("Record validated: {:?}", record.validated);
             *fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
         }
     }
@@ -468,7 +478,7 @@ fn load_and_parse_fasta(fasta_path: &str) -> Vec<SequenceRecord> {
 
         // Convert the identifier to V2 format and capture inferred version
         let (v2_id, inferred_version) = Identifier::from_unknown_format(&original_id, false).expect("Failed to convert ID to V2");
-        println!("Original ID: {}, V2 ID: {}, Inferred Version: {}", original_id, v2_id, inferred_version);
+        //println!("Original ID: {}, V2 ID: {}, Inferred Version: {}", original_id, v2_id, inferred_version);
 
         // Parse and normalize the V2 identifier
         let normalized_parsed_id = v2_id.normalize().unwrap();
@@ -510,7 +520,7 @@ fn boyer_moore_search_with_validation(
         let mut found_sequence_id = None;
         let mut found_orientation: Option<char> = None;
 
-        println!("Searching for pattern: {:?}", pattern);
+        //println!("Searching for pattern: {:?}", pattern);
 
         // Attempt search on the sequence specified by sequence_id
         if let Some(target_sequence) = genome_map.get(&record.sequence_id) {
@@ -632,18 +642,26 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
     match format {
         LogLevel::Summary => {
             let total_records = records.len();
-            let fixed_records: Vec<_> = records.iter().filter(|r| r.validated.is_some()).collect();
+            //let fixed_records: Vec<_> = records.iter().filter(|r| r.validated.is_some()).collect();
             let mut fix_counts = HashMap::new();
-            for record in &fixed_records {
-                *fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
+            let mut fixed_count = 0;
+            for record in records.iter() {
+                if record.validated.is_some() && record.validated.as_deref() != Some("valid") {
+                    fixed_count = fixed_count + 1;
+                    *fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
+                }
             }
+            let valid_count = records.iter().filter(|r| r.validated.as_deref() == Some("valid")).count();
+            let unvalidated_count = records.iter().filter(|r| r.validated.is_none()).count();
 
             println!("Summary Report:");
-            println!("Total Records: {}", total_records);
-            println!("Fixed Records: {}", fixed_records.len());
+            println!("  Total Sequences: {}", total_records);
+            println!("     Accurate Coordinates: {}", valid_count);
+            println!("     Repaired Coordinates: {}", fixed_count);
             for (fix_type, count) in fix_counts {
-                println!("  {}: {}", fix_type, count);
+                println!("        {}: {}", fix_type, count);
             }
+            println!("     Unvalidated Coordinates: {}", unvalidated_count);
         }
         LogLevel::Detailed => {
             println!("Detailed Report:");
@@ -656,17 +674,8 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
 
 fn main() {
     let args = Args::parse();
-    //let input_file = "/home/rhubley/notebooks/2024/1021-repeat_after_me_misalignment/examples/test/foo.stk";
-    //let genome_path = "/home/rhubley/notebooks/2024/1021-repeat_after_me_misalignment/examples/test/2/gen.2bit";
     let output_file = "output.unk"; // Define the output filename here
-    //let log_level = LogLevel::Summary;
     let debug_mode = false;
-
-    let text = b"CGTTTGTGGTAATTTAGAGTTTTGGGCCTAATGTTGATTTGTCGGAACCAGAAGGGGGTTAGTGTAGTTATTGTTTTAATGAGTATTTAAGGTTAATGAA";
-let pattern = b"TTT";
-
-let positions = boyer_moore_search(text, pattern);
-println!("{:?}", positions);
 
     // Check if the output file already exists
     if Path::new(output_file).exists() {
@@ -677,15 +686,18 @@ println!("{:?}", positions);
     let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect format and compression");
     let genome_map = load_genome_from_2bit_parallel(&args.twobit).expect("Failed to load genome");
 
+    // TODO: we should probably flag duplicate coordinates following fixes
     if  format == "FASTA" {
         let mut records = load_and_parse_fasta(&args.input);
-        validate_sequences(&mut records, &genome_map, true);
+        validate_sequences(&mut records, &genome_map, false);
         // Run Boyer-Moore search on unvalidated records
         if args.map_sequences {
             boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
         }
         output_results(&records, args.log_level);
-        write_fasta_output(&records, &args.output, is_gzip, false).expect("Failed to write output");
+        if ( ! args.output.is_empty() ) {
+            write_fasta_output(&records, &args.output, is_gzip, false).expect("Failed to write output");
+        }
     } else if format == "Stockholm" {
         parse_and_validate_stockholm(&args.input, &genome_map, &args.output, is_gzip, args.log_level, args.map_sequences).expect("Failed to parse Stockholm file");
     } else {
