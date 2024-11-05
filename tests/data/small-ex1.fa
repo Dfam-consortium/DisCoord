@@ -1,0 +1,30 @@
+>seq1        : valid
+CGTTTGTGGTAATTTAGAGTTTTGGGCCTAATGTTGATTTGTCGGAACCAGAAGGGGGTTAGTGTAGTTATTGTTTTAATGAGTATTTAAGGTTAATGAA
+>seq1        : invalid (single base change)
+CGTTTGTGGTAATTTACAGTTTTGGGCCTAATGTTGATTTGTCGGAACCAGAAGGGGGTTAGTGTAGTTATTGTTTTAATGAGTATTTAAGGTTAATGAA
+>seq2_7_10   : valid
+AAAT
+>seq2_7_10_- : valid
+ATTT
+>seq2_6_10   : fixed_halfopen
+AAAT
+>Seq3_43_56  : valid (crosses FASTA line boundary)
+TTTCTCAACTAATT
+>Seq3_42_55  : fixed_plus1
+TTTCTCAACTAATT
+>Seq3_41_54  : fixed_plus2
+TTTCTCAACTAATT
+>Seq3_40_53  : fixed_plus3
+TTTCTCAACTAATT
+>Seq3_44_57  : fixed_minus1
+TTTCTCAACTAATT
+>Seq3_45_58  : fixed_minus2
+TTTCTCAACTAATT
+>Seq3_46_59  : fixed_minus3
+TTTCTCAACTAATT
+>seq1_1_20_R : fixed_mapped_unique not from 1-20 but rather 63-72
+TGTAGTTATTGTTTTAATGA
+>seq1_1_4    : fixed_mapped_unique (at least on seq1 it is) not from 1-4 but rather 11-14
+AATTTA
+>seq1_27_29  : fixed_mapped_... not from 27-29 but rather 20-22...or 38-40 (are the closest)
+TTT

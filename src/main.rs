@@ -11,7 +11,7 @@ use std::io::Write;
 use std::io::BufWriter;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
-//use std::time::Instant;
+use std::time::Instant;
 use smitten::{Identifier, IDVersion};
 use bio::io::fasta;
 
@@ -664,7 +664,7 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
             for (fix_type, count) in fix_counts {
                 println!("        {}: {}", fix_type, count);
             }
-            println!("     Unvalidated Coordinates: {}", unvalidated_count);
+            println!("     Invalid Coordinates: {}", unvalidated_count);
         }
         LogLevel::Detailed => {
             println!("Detailed Report:");
@@ -677,19 +677,22 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
 
 fn main() {
     let args = Args::parse();
-    let output_file = "output.unk"; // Define the output filename here
     let debug_mode = false;
 
     // Check if the output file already exists
-    if Path::new(output_file).exists() {
-        eprintln!("Error: The output file '{}' already exists. Please specify a different filename.", output_file);
+    if !args.output.is_empty() && Path::new(&args.output).exists() {
+        eprintln!("Error: The output file '{}' already exists. Please specify a different filename.", &args.output);
         std::process::exit(1); // Exit the program to avoid overwriting
     }
 
+    let mut start = Instant::now();
     let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect format and compression");
     let genome_map = load_genome_from_2bit_parallel(&args.twobit).expect("Failed to load genome");
+    let loading_duration = start.elapsed(); // Get the elapsed time
 
     // TODO: we should probably flag duplicate coordinates following fixes
+   
+    start = Instant::now();
     if  format == "FASTA" {
         let mut records = load_and_parse_fasta(&args.input);
         validate_sequences(&mut records, &genome_map, false);
@@ -706,6 +709,11 @@ fn main() {
     } else {
         panic!("Unsupported format");
     }
+    let validation_duration = start.elapsed(); // Get the elapsed time
+
+    println!("\nRuntime stats:");
+    println!("  Loading sequences: {:?} s", loading_duration);
+    println!("         Validation: {:?} s", validation_duration);
 }
 
 
