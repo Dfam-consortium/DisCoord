@@ -175,7 +175,10 @@ fn process_stockholm_record(
     output_results(&records, log_level.clone());
 
     // Write the output in append mode
-    write_stockholm_output(&records, metadata, output_path, is_gzip, true).expect("Failed to write Stockholm output");
+
+    if ! output_path.is_empty() {
+        write_stockholm_output(&records, metadata, output_path, is_gzip, true).expect("Failed to write Stockholm output");
+    }
 }
 
 fn write_stockholm_output(
@@ -518,7 +521,7 @@ fn boyer_moore_search_with_validation(
         let rev_complement_pattern = reverse_complement(pattern);
         let mut found_positions = vec![];
         let mut found_sequence_id = None;
-        let mut found_orientation: Option<char> = None;
+        //let mut found_orientation: Option<char> = None;
 
         //println!("Searching for pattern: {:?}", pattern);
 
@@ -695,7 +698,7 @@ fn main() {
             boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
         }
         output_results(&records, args.log_level);
-        if ( ! args.output.is_empty() ) {
+        if ! args.output.is_empty() {
             write_fasta_output(&records, &args.output, is_gzip, false).expect("Failed to write output");
         }
     } else if format == "Stockholm" {
