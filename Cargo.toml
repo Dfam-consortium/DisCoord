@@ -1,0 +1,18 @@
+[package]
+name = "DisCoord"
+version = "0.1.0"
+edition = "2021"
+authors = ["Robert Hubley <rhubley@systemsbiology.org>"]
+
+[[bin]]
+name = "discoord"  
+path = "src/main.rs"
+
+[dependencies]
+smitten = { git = "https://github.com/Dfam-consortium/Smitten.git", tag = "v1.0.0-alpha" }
+clap = { version = "4", features = ["derive"] }
+regex = "1.11.1"
+flate2 = "1.0"
+bio = "0.35.0"        # For handling FASTA and sequences
+rayon = "1.5"         # For parallel processing
+
