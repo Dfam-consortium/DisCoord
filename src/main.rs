@@ -348,64 +348,60 @@ fn validate_sequences(
         let rev_complement = reverse_complement(fasta_sequence);
         let mut located = false;
 
-        println!("Working on start {} and end {}", start, end);
-        println!("Working on fasta_sequence {:?}", fasta_sequence);
-        println!("Working on genome_sequence {:?}", genome_sequence[start..end].to_vec());
+        //println!("  Working on start {} and end {}", start, end);
+        //println!("  Working on fasta_sequence {:?}", fasta_sequence);
+        //println!("  Working on genome_sequence {:?}", genome_sequence[start..end].to_vec());
 
 
         // 1. Direct match on same strand
         if start < genome_sequence.len() && end <= genome_sequence.len() {
             if &genome_sequence[start..end] == fasta_sequence {
                 located = true;
-                if record.orient == Some('+') {
-                    //record.validated = Some("valid".to_string());
-                } else {
-                    //record.validated = Some("fixed_orient".to_string());
+                if record.orient != Some('+') {
                     validation_str.push_str("_orient");
                     record.orient = Some('-');
                 }
-                //*fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
                 if debug_mode {
                     println!("Direct match validated for: {:?}", record);
                 }
-                //continue;
             }
+        }
 
         // 2. Reverse complement match on opposite strand
-        }else if start < genome_sequence.len() && end <= genome_sequence.len() {
+        if !located && start < genome_sequence.len() && end <= genome_sequence.len() {
             if &genome_sequence[start..end] == &rev_complement {
                 located = true;
                 if record.orient == Some('+') {
-                    //record.validated = Some("fixed_orient".to_string());
                     validation_str.push_str("_orient");
                     record.orient = Some('-');
-                } else {
-                    //record.validated = Some("valid".to_string());
                 }
-                //*fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
                 if debug_mode {
                     println!("Reverse complement validated for: {:?}", record);
                 }
-                //continue;
             }
+        }
 
-        }else {
-            // 3. Shifted matches on both strands within ±3bp range
-            let shifts = [-3, -2, -1, 1, 2, 3];
+        if !located {
+            // 3. Shifted matches on both strands within +/-3bp range
+            let shifts: [isize; 6] = [-3, -2, -1, 1, 2, 3];
+            let orig_len = end.saturating_sub(start);
             for shift in shifts.iter() {
-                let shifted_start = start as isize + shift;
-                let shifted_end = end as isize + shift;
+                let shifted_start = if *shift < 0 {
+                    start.saturating_sub((-*shift) as usize)
+                } else {
+                    start.saturating_add(*shift as usize)
+                };
 
-                if shifted_start >= 0 && (shifted_end as usize) <= genome_sequence.len() {
-                    let shifted_start = shifted_start as usize;
-                    let shifted_end = shifted_end as usize;
+                let shifted_end = if *shift < 0  {
+                    end.saturating_sub((-*shift) as usize)
+                } else {
+                    end.saturating_add(*shift as usize)
+                };
+                let new_len = shifted_end.saturating_sub(shifted_start);
 
+                if new_len == orig_len && shifted_end  <= genome_sequence.len() {
                     // Check forward orientation with shift
                     if &genome_sequence[shifted_start..shifted_end] == fasta_sequence {
-                        //record.validated = Some(format!("fixed{}{}{}",
-                        //    if record.orient == Some('-') { "_orient" } else { "" },
-                        //    if *shift >= 0 { "_plus" } else { "_minus" },
-                        //    shift.abs()));
                         validation_str.push_str(&format!("{}{}{}", 
                             if record.orient == Some('-') { "_orient" } else { "" },
                             if *shift >= 0 { "_plus" } else { "_minus" },
@@ -413,17 +409,12 @@ fn validate_sequences(
                         record.start = Some((shifted_start + 1) as u64);
                         record.end = Some(shifted_end as u64);
                         record.orient = if record.orient == Some('-') { Some('+') } else { Some('+') };
-                        //*fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
                         located = true;
                         break;
                     }
 
                     // Check reverse complement with shift
                     if &genome_sequence[shifted_start..shifted_end] == &rev_complement {
-                        //record.validated = Some(format!("fixed{}{}{}",
-                        //    if record.orient == Some('+') { "_orient" } else { "" },
-                        //    if *shift >= 0 { "_plus" } else { "_minus" },
-                        //    shift.abs()));
                         validation_str.push_str(&format!("{}{}{}", 
                             if record.orient == Some('+') { "_orient" } else { "" },
                             if *shift >= 0 { "_plus" } else { "_minus" },
@@ -431,7 +422,6 @@ fn validate_sequences(
                         record.start = Some((shifted_start + 1) as u64);
                         record.end = Some(shifted_end as u64);
                         record.orient = if record.orient == Some('+') { Some('-') } else { Some('-') };
-                        //*fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
                         located = true;
                         break;
                     }
@@ -507,31 +497,75 @@ fn load_and_parse_fasta(fasta_path: &str) -> Vec<SequenceRecord> {
     parsed_records
 }
 
-
 fn boyer_moore_search_with_validation(
     records: &mut [SequenceRecord],
     genome_map: &HashMap<String, Vec<u8>>,
     debug_mode: bool,
 ) {
-    for record in records.iter_mut().filter(|r| r.validated.is_none()) {
+    records.par_iter_mut().filter(|r| r.validated.is_none()).for_each(|record| {
+    //for record in records.iter_mut().filter(|r| r.validated.is_none()) {
         let pattern = &record.sequence;
         let rev_complement_pattern = reverse_complement(pattern);
         let mut found_positions = vec![];
+        let mut found_sequence_id = None;
+        let mut found_orientation: Option<char> = None;
 
-        // Search forward strand
+        println!("Searching for pattern: {:?}", pattern);
+
+        // Attempt search on the sequence specified by sequence_id
         if let Some(target_sequence) = genome_map.get(&record.sequence_id) {
-            found_positions.extend(boyer_moore_search(target_sequence, pattern));
+            // Search forward strand
+            found_positions.extend(boyer_moore_search(target_sequence, pattern).into_iter().map(|pos| (pos, '+')));
 
             // Search reverse strand
-            found_positions.extend(boyer_moore_search(target_sequence, &rev_complement_pattern));
+            found_positions.extend(boyer_moore_search(target_sequence, &rev_complement_pattern).into_iter().map(|pos| (pos, '-')));
         }
 
-        if found_positions.len() == 1 {
-            record.start = Some(found_positions[0] as u64 + 1);
-            record.validated = Some("fixed_remapped_unique".to_string());
-        } else if found_positions.len() > 1 {
-            record.start = Some(found_positions[0] as u64 + 1);
-            record.validated = Some("fixed_remapped_ambig".to_string());
+        // Check if there are matches on the specified sequence_id
+        if found_positions.is_empty() {
+            // Search other sequences in genome_map if no match is found on the specified sequence_id
+            for (seq_name, genome_sequence) in genome_map {
+                if seq_name == &record.sequence_id {
+                    continue; // Skip the original sequence_id since it was already checked
+                }
+                // Search forward strand
+                found_positions.extend(boyer_moore_search(genome_sequence, pattern).into_iter().map(|pos| (pos, '+')));
+
+                // Search reverse strand
+                found_positions.extend(boyer_moore_search(genome_sequence, &rev_complement_pattern).into_iter().map(|pos| (pos, '-')));
+
+                if !found_positions.is_empty() {
+                    found_sequence_id = Some(seq_name.clone());
+                    break;
+                }
+            }
+        } else {
+            found_sequence_id = Some(record.sequence_id.clone());
+        }
+
+        // Process found positions
+        if !found_positions.is_empty() {
+            let closest = if found_positions.len() == 1 {
+                found_positions[0]
+            } else {
+                // Find closest match to the start position in found_positions
+                found_positions
+                    .iter()
+                    .min_by_key(|&&(pos, _)| (pos as isize - record.start.unwrap() as isize).abs())
+                    .copied()
+                    .unwrap_or(found_positions[0])
+            };
+
+            // Update start, end, orientation, sequence_id, and validated status
+            record.start = Some(closest.0 as u64 + 1);
+            record.end = Some((closest.0 + pattern.len()) as u64);
+            record.orient = Some(closest.1);
+            record.sequence_id = found_sequence_id.unwrap();
+            record.validated = Some(if found_positions.len() == 1 {
+                "fixed_remapped_unique".to_string()
+            } else {
+                "fixed_remapped_ambig".to_string()
+            });
         }
 
         if debug_mode {
@@ -541,37 +575,55 @@ fn boyer_moore_search_with_validation(
                 println!("Boyer-Moore failed to fix for record: {:?}", record);
             }
         }
-    }
+    });
 }
 
+
+fn bad_char_heuristic(pattern: &[u8], bad_char: &mut [isize; 256]) {
+    for i in 0..256 {
+        bad_char[i] = -1; // Initialize all occurrences as -1
+    }
+
+    for (i, &ch) in pattern.iter().enumerate() {
+        bad_char[ch as usize] = i as isize; // Last occurrence of each character in the pattern
+    }
+}
 
 fn boyer_moore_search(text: &[u8], pattern: &[u8]) -> Vec<usize> {
     let m = pattern.len();
     let n = text.len();
-    let mut skip_table = vec![m; 256];
-    for i in 0..m - 1 {
-        skip_table[pattern[i] as usize] = m - i - 1;
+    if m == 0 || m > n {
+        return vec![]; // Early return if pattern is empty or longer than text
     }
 
-    let mut positions = vec![];
-    let mut i = 0;
+    let mut bad_char = [-1; 256];
+    bad_char_heuristic(pattern, &mut bad_char);
 
-    while i <= n - m {
+    let mut positions = Vec::new();
+    let mut s = 0; // s is the shift of the pattern with respect to text
+
+    while s <= n - m {
         let mut j = (m - 1) as isize;
-        while j >= 0 && pattern[j as usize] == text[i + j as usize] {
+
+        // Decrease j while characters of pattern and text are matching at this shift s
+        while j >= 0 && pattern[j as usize] == text[s + j as usize] {
             j -= 1;
         }
 
         if j < 0 {
-            positions.push(i);
-            i += m;
+            // Pattern found at current shift
+            positions.push(s);
+
+            // Shift pattern to align next character in text with last occurrence in pattern
+            s += if s + m < n { m - bad_char[text[s + m] as usize] as usize } else { 1 };
         } else {
-            i += skip_table[text[i + j as usize] as usize];
+            // Shift pattern to align bad character in text with last occurrence in pattern
+            s += (j - bad_char[text[s + j as usize] as usize]).max(1) as usize;
         }
     }
+
     positions
 }
-
 
 
 
@@ -609,6 +661,12 @@ fn main() {
     let output_file = "output.unk"; // Define the output filename here
     //let log_level = LogLevel::Summary;
     let debug_mode = false;
+
+    let text = b"CGTTTGTGGTAATTTAGAGTTTTGGGCCTAATGTTGATTTGTCGGAACCAGAAGGGGGTTAGTGTAGTTATTGTTTTAATGAGTATTTAAGGTTAATGAA";
+let pattern = b"TTT";
+
+let positions = boyer_moore_search(text, pattern);
+println!("{:?}", positions);
 
     // Check if the output file already exists
     if Path::new(output_file).exists() {
