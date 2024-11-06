@@ -66,7 +66,7 @@ impl SequenceRecord {
             self.end.unwrap_or(0),    // Default to 0 if None
             self.orient.unwrap_or('?'),
             self.inferred_version,
-            self.validated.as_deref().unwrap_or("Not validated"),
+            self.validated.as_deref().unwrap_or(""),
         );
     }
 }
@@ -169,6 +169,12 @@ fn process_stockholm_record(
     if map_seqs {
         // Run Boyer-Moore search on unvalidated records
         boyer_moore_search_with_validation(&mut records, genome_map, false);
+    }
+
+    for record in records.iter_mut() {
+        if record.validated.is_none() {
+            record.validated = Some("invalid".to_string());
+        }
     }
 
     // Log what we did
@@ -645,17 +651,17 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
     match format {
         LogLevel::Summary => {
             let total_records = records.len();
-            //let fixed_records: Vec<_> = records.iter().filter(|r| r.validated.is_some()).collect();
             let mut fix_counts = HashMap::new();
             let mut fixed_count = 0;
             for record in records.iter() {
-                if record.validated.is_some() && record.validated.as_deref() != Some("valid") {
+                if record.validated.is_some() && record.validated.as_deref() != Some("valid") &&
+                   record.validated.as_deref() != Some("invalid") {
                     fixed_count = fixed_count + 1;
                     *fix_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
                 }
             }
             let valid_count = records.iter().filter(|r| r.validated.as_deref() == Some("valid")).count();
-            let unvalidated_count = records.iter().filter(|r| r.validated.is_none()).count();
+            let invalid_count = records.iter().filter(|r| r.validated.as_deref() == Some("invalid")).count();
 
             println!("Summary Report:");
             println!("  Total Sequences: {}", total_records);
@@ -664,7 +670,7 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
             for (fix_type, count) in fix_counts {
                 println!("        {}: {}", fix_type, count);
             }
-            println!("     Invalid Coordinates: {}", unvalidated_count);
+            println!("     Invalid Coordinates: {}", invalid_count);
         }
         LogLevel::Detailed => {
             println!("Detailed Report:");
@@ -699,6 +705,11 @@ fn main() {
         // Run Boyer-Moore search on unvalidated records
         if args.map_sequences {
             boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
+        }
+        for record in records.iter_mut() {
+            if record.validated.is_none() {
+                record.validated = Some("invalid".to_string());
+            }
         }
         output_results(&records, args.log_level);
         if ! args.output.is_empty() {

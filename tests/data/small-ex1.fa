@@ -22,9 +22,17 @@ TTTCTCAACTAATT
 TTTCTCAACTAATT
 >Seq3_46_59  : fixed_minus3
 TTTCTCAACTAATT
->seq1_1_20_R : fixed_mapped_unique not from 1-20 but rather 63-72
+>seq1_1_20_R : fixed_remapped_unique not from 1-20 but rather 63-72
 TGTAGTTATTGTTTTAATGA
->seq1_1_4    : fixed_mapped_unique (at least on seq1 it is) not from 1-4 but rather 11-14
+>seq1_1_4    : fixed_remapped_unique (at least on seq1 it is) not from 1-4 but rather 11-14
 AATTTA
->seq1_27_29  : fixed_mapped_... not from 27-29 but rather 20-22...or 38-40 (are the closest)
+>seq1_27_29  : fixed_remapped_ambig not from 27-29 but rather 21-23 (closest)
 TTT
+>seq1_120_131_R : fixed_remapped_unique not on seq1 but Seq3 from 16-27
+CACCGAGTACAC
+>seq1_120_131 : fixed_remapped_unique not on seq1 but Seq3 from 69-80 and on reverse strand
+TCACGCAGAATA
+>Seq3_6_45_R_26_40_12_15_R : valid normalized equivalent should be Seq3:6-9_+
+GCCC
+>seq2_19_26_R : fixed_orient
+TAAAAAAG
