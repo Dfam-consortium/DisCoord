@@ -4,14 +4,33 @@
 ## Overview
 
 DisCoord is a tool for validating and fixing sequence coordinates in FASTA or Stockholm files. 
-In addition to detecting small errors in the coordinates, such as shifted ranges, half-open
-coordinates, or strand errors, DisCoord can also map the sequences to the reference sequence 
-to detect and fix larger errors.
+In addition to detecting small errors in the coordinates, such as shifted ranges, mixed up
+interval boundaries ( e.g half-open, fully closed), or strand errors, DisCoord can also map 
+the sequences to the reference sequence to detect and fix larger errors.
+
+DisCoord is designed to work with sequence identifiers that include coordinates and strand
+information.  Many formats do not formally define these data elements (I am looking at you
+FASTA), and as a consequence many ad-hoc encodings have flourished. We have our own custom
+encoding (Smitten Format -- https://github.com/Dfam-consortium/Smitten), but any parsable 
+format could be added to the code to support coordinate validations.
+
+For example a FASTA record might look like this:
+
+```
+>hs1:chr1:100-200_+
+taaccctaaccctaaccctaaccctaaccctaaccctaaccctaacccta
+accctaaccctaaccctaaccctaacccctaaccctaaccctaaccctaa
+c
+```
+
+Where this sequence identifier encodes the assembly ('hs1'), the sequence identifier ('chr1'),
+the start and end coordinates (100-200 a one-based, fully-closed interval) and the strand ('+'). 
 
 ## Installation
 
 * [Install Rust](https://www.rust-lang.org/tools/install)
 * Run **`cargo build --release`** to build the release binary file.
+* The binary 'discoord' will be in the **`target/release`** directory.
 
 
 ## Usage
@@ -54,14 +73,6 @@ or using a FASTA reference rather than UCSC 2bit format:
 
 ```
 
-## Sequence Identifiers With Coordinates
-
-DisCoord is designed to work with sequence identifiers that include coordinates and strand
-information.  Many formats do not formally define these data elements (I am looking at you
-FASTA), and as a consequence many ad-hoc encodings have flourished. We have our own custom
-encoding (Smitten Format -- see below), but any parsable format could be added to the
-code to support coordinate validations.
-
 ### Smitten Format
 
 The Smitten format is a simple encoding for sequence identifiers that (as of V2) includes:
@@ -82,10 +93,3 @@ and indicates that the sequence is base pairs 5-10 of the sequence parent sequen
 The only reserved character is the colon (':') which is used to separate the assembly_id,
 sequence_id and subranges. 
 
-
-
-
-
-
-DisCoord is designed to work with sequence identifiers that include coordinates and strand 
-information, such as the Smitten format (https://github.com/Dfam-consortium/Smitten).  
