@@ -27,7 +27,7 @@ Arguments:
   <INPUT>  Input file path (Fasta or Stockholm format)
 
 Options:
-  -t, --twobit <TWOBIT>        Path to the 2bit genome file
+  -r, --reference <REFERENCE>  Path to the reference sequence file [twobit, or fasta]
   -m, --map-sequences          Enable mapping (Boyer-Moore) for invalid identifiers
   -o, --output <OUTPUT>        Optional output file path [default: ]
   -l, --log-level <LOG_LEVEL>  Log level (Summary, PerRecord or Detailed) [default: summary] [possible values: summary, per-record, detailed]
@@ -37,16 +37,21 @@ Options:
 
 
 # Validate a FASTA file, looking for minor errors in coordinates
-% ./target/release/discoord -t hg38.2bit test.fasta
+% ./target/release/discoord -r hg38.2bit test.fasta
+
+or using a FASTA reference rather than UCSC 2bit format:
+
+% ./target/release/discoord -r hg38.fa test.fasta 
 
 # Validate a Stockholm file, looking for minor errors in coordinates
-% ./target/release/discoord -t hg38.2bit test.stk
+% ./target/release/discoord -r hg38.2bit test.stk
 
 # Identify more serious errors using the Boyer-Moore algorithm to map sequences to the reference
-% ./target/release/discoord -t hg38.2bit -m test.fasta
+% ./target/release/discoord -r hg38.2bit -m test.fasta
 
 # Identify and fix errors, generating a new sequence file
-% ./target/release/discoord -t hg38.2bit -m -o fixed.fasta test.fasta
+% ./target/release/discoord -r hg38.2bit -m -o fixed.fasta test.fasta
+
 ```
 
 ## Sequence Identifiers With Coordinates

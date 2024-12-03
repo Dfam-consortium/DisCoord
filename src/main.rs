@@ -10,20 +10,21 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::io::BufWriter;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::Instant;
 use smitten::{Identifier, IDVersion};
 use bio::io::fasta;
 use regex::Regex;
+use memmap2::Mmap;
 
 /// Command-line arguments
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the 2bit genome file
+    /// Path to the reference sequence file [twobit, or fasta]
     #[arg(short, long)]
-    twobit: String,
+    reference: String,
 
     /// Enable mapping (Boyer-Moore) for invalid identifiers
     #[arg(short, long, default_value = "false")]
@@ -743,6 +744,45 @@ fn output_results(records: &[SequenceRecord], format: LogLevel, label: String) {
     }
 }
 
+/// Enum to represent the type of sequence file.
+#[derive(Debug, PartialEq)]
+pub enum SequenceFileType {
+    Fasta,
+    TwoBit,
+    Unknown,
+}
+
+/// Determines the type of a sequence file by inspecting its signature.
+///
+/// # Arguments
+/// * `path` - Path to the sequence file.
+///
+/// # Returns
+/// A `Result` containing the detected `SequenceFileType`.
+pub fn determine_sequence_file_type(path: &str) -> io::Result<SequenceFileType> {
+    let mut file = File::open(path)?;
+    let mut buffer = [0; 4];
+
+    // Step 1: Read the first 4 bytes
+    file.read_exact(&mut buffer)?;
+
+    // Step 2: Check for 2bit magic number
+    let magic_be = u32::from_be_bytes(buffer);
+    let magic_le = u32::from_le_bytes(buffer);
+    if magic_be == 0x1A412743 || magic_le == 0x1A412743 {
+        return Ok(SequenceFileType::TwoBit);
+    }
+
+    // Step 3: Check if the file starts with '>' (FASTA file)
+    let mut file = BufReader::new(file);
+    file.read_exact(&mut buffer[..1])?; // Read the first byte only
+    if buffer[0] == b'>' {
+        return Ok(SequenceFileType::Fasta);
+    }
+
+    // If neither match, return Unknown
+    Ok(SequenceFileType::Unknown)
+}
 
 fn main() {
     let args = Args::parse();
@@ -769,8 +809,15 @@ fn main() {
     let mut start = Instant::now();
     let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect format and compression");
     println!("## File: {}, Format: {}, Compression: {}", &args.input, format, if is_gzip { "Gzip" } else { "None" });
-    println!("## Reference: {}", &args.twobit);
-    let genome_map = load_genome_from_2bit_parallel(&args.twobit).expect("Failed to load genome");
+
+    let ref_file_type = determine_sequence_file_type(&args.reference).expect("Failed to determine reference file type");
+    println!("## Reference: {}, format: {:?}", &args.reference, ref_file_type);
+    let genome_map = if ref_file_type == SequenceFileType::TwoBit {
+        load_genome_from_2bit_parallel(&args.reference).expect("Failed to load genome")
+    } else {
+        load_genome_from_fasta_parallel(&args.reference).expect("Failed to load genome")
+    };
+
     let loading_duration = start.elapsed(); // Get the elapsed time
 
     // TODO: we should probably flag duplicate coordinates following fixes
@@ -805,161 +852,116 @@ fn main() {
 }
 
 
-fn load_genome_from_2bit_parallel(path: &str) -> io::Result<HashMap<String, Vec<u8>>> {
-    let mut file = File::open(Path::new(path))?;
-    let mut buffer = [0; 4];
+pub fn load_genome_from_fasta_parallel(path: &str) -> io::Result<HashMap<String, Vec<u8>>> {
+    // Open the FASTA file for reading
+    let reader = fasta::Reader::from_file(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    
+    // Collect sequences into a vector of tuples (name, sequence)
+    let sequences: Vec<(String, Vec<u8>)> = reader
+        .records()
+        .par_bridge() // Convert to a parallel iterator
+        .map(|result| {
+            let record = result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let name = record.id().to_string(); // Sequence ID
+            let sequence = record.seq().to_vec(); // Sequence data
+            Ok((name, sequence))
+        })
+        .collect::<Result<_, io::Error>>()?;
+    
+    // Collect into a HashMap
+    let genome_map: HashMap<String, Vec<u8>> = sequences.into_iter().collect();
 
-    // Step 1: Read and check the file signature to determine endianness
-    file.read_exact(&mut buffer)?;
-    let signature_be = u32::from_be_bytes(buffer);
-    let signature_le = u32::from_le_bytes(buffer);
-    let is_little_endian = if signature_be == 0x1A412743 {
-        false
-    } else if signature_le == 0x1A412743 {
-        true
-    } else {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid 2bit file signature"));
+    Ok(genome_map)
+}
+
+
+
+pub fn load_genome_from_2bit_parallel(path: &str) -> io::Result<HashMap<String, Vec<u8>>> {
+    let file = File::open(path)?;
+    let mmap = unsafe { Mmap::map(&file)? };
+    let buffer = &mmap[..];
+
+    // Step 1: Parse header
+    let is_little_endian = match u32::from_be_bytes(buffer[0..4].try_into().unwrap()) {
+        0x1A412743 => false,
+        0x4327411A => true,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid 2bit signature")),
     };
 
-    // Step 2: Read the version number (4 bytes)
-    file.read_exact(&mut buffer)?;
-    let version = if is_little_endian {
-        u32::from_le_bytes(buffer)
-    } else {
-        u32::from_be_bytes(buffer)
-    };
-    if version > 1 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported 2bit file version"));
-    }
-
-    // Step 3: Read the sequence count
-    file.read_exact(&mut buffer)?;
-    let seq_count = if is_little_endian {
-        u32::from_le_bytes(buffer)
-    } else {
-        u32::from_be_bytes(buffer)
-    } as usize;
-
-    // Step 4: Skip the reserved 4 bytes
-    file.seek(SeekFrom::Current(4))?;
-
-    // Step 5: Read sequence names and offsets without seeking to sequence data yet
-    let mut sequences = Vec::new();
-    for _ in 0..seq_count {
-        // Read the sequence name length (1 byte)
-        let mut name_len_buf = [0; 1];
-        file.read_exact(&mut name_len_buf)?;
-        let name_len = name_len_buf[0] as usize;
-
-        // Read the sequence name
-        let mut name_buf = vec![0; name_len];
-        file.read_exact(&mut name_buf)?;
-        let name = String::from_utf8(name_buf).expect("Invalid UTF-8 in sequence name");
-
-        // Read the sequence offset based on file version
-        let offset = if version == 0 {
-            file.read_exact(&mut buffer)?;
-            if is_little_endian {
-                u32::from_le_bytes(buffer) as u64
-            } else {
-                u32::from_be_bytes(buffer) as u64
-            }
+    let read_u32 = |offset: usize| {
+        let bytes: [u8; 4] = buffer[offset..offset + 4].try_into().unwrap();
+        if is_little_endian {
+            u32::from_le_bytes(bytes)
         } else {
-            let mut offset_buf = [0; 8];
-            file.read_exact(&mut offset_buf)?;
-            if is_little_endian {
-                u64::from_le_bytes(offset_buf)
-            } else {
-                u64::from_be_bytes(offset_buf)
-            }
-        };
+            u32::from_be_bytes(bytes)
+        }
+    };
 
-        // Collect sequence metadata
-        sequences.push((name, offset));
+    let version = read_u32(4);
+    if version > 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Unsupported 2bit version"));
     }
 
-    // Step 6: Load each sequence in parallel
+    let seq_count = read_u32(8) as usize;
+
+    // Step 2: Parse sequence metadata
+    let mut sequences = Vec::new();
+    let mut offset = 16;
+
+    for _ in 0..seq_count {
+        let name_len = buffer[offset] as usize;
+        offset += 1;
+
+        let name = String::from_utf8(buffer[offset..offset + name_len].to_vec()).unwrap();
+        offset += name_len;
+
+        let seq_offset = if version == 0 {
+            read_u32(offset) as u64
+        } else {
+            u64::from_be_bytes(buffer[offset..offset + 8].try_into().unwrap())
+        };
+        offset += if version == 0 { 4 } else { 8 };
+
+        sequences.push((name, seq_offset));
+    }
+
+    // Step 3: Decode DNA in parallel
     let genome_map: HashMap<String, Vec<u8>> = sequences
         .into_par_iter()
-        .map(|(name, offset)| {
-            let mut file = File::open(Path::new(path)).expect("Could not reopen 2bit file");
-            let mut buffer = [0; 4];
+        .map(|(name, seq_offset)| {
+            let dna_size = read_u32(seq_offset as usize) as usize;
 
-            // Seek to the sequence offset
-            file.seek(SeekFrom::Start(offset)).expect("Seek failed");
+            // Read N block data
+            let n_block_count = read_u32((seq_offset + 4) as usize) as usize;
+            let mut n_block_starts = Vec::with_capacity(n_block_count);
+            let mut n_block_sizes = Vec::with_capacity(n_block_count);
 
-            // Step 6.1: Read dnaSize
-            file.read_exact(&mut buffer).expect("Failed to read dnaSize");
-            let dna_size = if is_little_endian {
-                u32::from_le_bytes(buffer) as usize
-            } else {
-                u32::from_be_bytes(buffer) as usize
-            };
+            let mut current_offset = (seq_offset + 8) as usize;
 
-            // Step 6.2: Read nBlockCount and nBlockStarts/nBlockSizes
-            file.read_exact(&mut buffer).expect("Failed to read nBlockCount");
-            let n_block_count = if is_little_endian {
-                u32::from_le_bytes(buffer) as usize
-            } else {
-                u32::from_be_bytes(buffer) as usize
-            };
-
-            let mut n_block_starts = vec![0; n_block_count];
-            for start in n_block_starts.iter_mut() {
-                file.read_exact(&mut buffer).expect("Failed to read nBlockStart");
-                *start = if is_little_endian {
-                    u32::from_le_bytes(buffer) as usize
-                } else {
-                    u32::from_be_bytes(buffer) as usize
-                };
+            for _ in 0..n_block_count {
+                let start = read_u32(current_offset) as usize;
+                n_block_starts.push(start);
+                current_offset += 4;
             }
 
-            let mut n_block_sizes = vec![0; n_block_count];
-            for size in n_block_sizes.iter_mut() {
-                file.read_exact(&mut buffer).expect("Failed to read nBlockSize");
-                *size = if is_little_endian {
-                    u32::from_le_bytes(buffer) as usize
-                } else {
-                    u32::from_be_bytes(buffer) as usize
-                };
+            for _ in 0..n_block_count {
+                let size = read_u32(current_offset) as usize;
+                n_block_sizes.push(size);
+                current_offset += 4;
             }
+            
+            // Read mask block data
+            let mask_block_count = read_u32((current_offset) as usize) as usize;
+            // For now we do not need the mask data
+            current_offset = current_offset + (mask_block_count * 8) + 4;
 
-            // Step 6.3: Read maskBlockCount and maskBlockStarts/maskBlockSizes
-            file.read_exact(&mut buffer).expect("Failed to read maskBlockCount");
-            let mask_block_count = if is_little_endian {
-                u32::from_le_bytes(buffer) as usize
-            } else {
-                u32::from_be_bytes(buffer) as usize
-            };
+            // Skipped the reserved bytes
+            current_offset += 4;
 
-            let mut mask_block_starts = vec![0; mask_block_count];
-            for start in mask_block_starts.iter_mut() {
-                file.read_exact(&mut buffer).expect("Failed to read maskBlockStart");
-                *start = if is_little_endian {
-                    u32::from_le_bytes(buffer) as usize
-                } else {
-                    u32::from_be_bytes(buffer) as usize
-                };
-            }
-
-            let mut mask_block_sizes = vec![0; mask_block_count];
-            for size in mask_block_sizes.iter_mut() {
-                file.read_exact(&mut buffer).expect("Failed to read maskBlockSize");
-                *size = if is_little_endian {
-                    u32::from_le_bytes(buffer) as usize
-                } else {
-                    u32::from_be_bytes(buffer) as usize
-                };
-            }
-
-            // Step 6.4: Skip the reserved 4 bytes
-            file.seek(SeekFrom::Current(4)).expect("Failed to skip reserved bytes");
-
-            // Step 6.5: Read packed DNA
+            // Read packed DNA
             let mut genome = vec![b'N'; dna_size];
             for i in 0..((dna_size + 3) / 4) {
-                file.read_exact(&mut buffer[0..1]).expect("Failed to read packed DNA");
-                let byte = buffer[0];
+                let byte = buffer[current_offset + i];
                 for j in 0..4 {
                     let pos = i * 4 + j;
                     if pos >= dna_size {
@@ -984,21 +986,12 @@ fn load_genome_from_2bit_parallel(path: &str) -> io::Result<HashMap<String, Vec<
                 }
             }
 
-            // In this application we do not want to lowercase any bases
-            // Apply mask blocks (convert to lowercase for masked regions)
-            //for (&start, &size) in mask_block_starts.iter().zip(mask_block_sizes.iter()) {
-            //    for pos in start..(start + size) {
-            //        if pos < genome.len() {
-            //            genome[pos] = genome[pos].to_ascii_lowercase();
-            //        }
-            //    }
-            //}
-
-            // Return the sequence name and data
+            // Return the sequence name and genome data
             (name, genome)
         })
         .collect();
 
     Ok(genome_map)
 }
+
 

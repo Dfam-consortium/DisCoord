@@ -1,6 +1,6 @@
 [package]
 name = "DisCoord"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 repository = "https://github.com/Dfam-consortium/DisCoord"
 authors = ["Robert Hubley <rhubley@systemsbiology.org>"]
@@ -17,4 +17,5 @@ regex = "1.11.1"
 flate2 = "1.0"
 bio = "0.35.0"        # For handling FASTA and sequences
 rayon = "1.5"         # For parallel processing
+memmap2 = "0.9.5"
 
