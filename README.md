@@ -30,7 +30,8 @@ Options:
   -t, --twobit <TWOBIT>        Path to the 2bit genome file
   -m, --map-sequences          Enable mapping (Boyer-Moore) for invalid identifiers
   -o, --output <OUTPUT>        Optional output file path [default: ]
-  -l, --log-level <LOG_LEVEL>  Log level (Summary or Detailed) [default: summary] [possible values: summary, detailed]
+  -l, --log-level <LOG_LEVEL>  Log level (Summary, PerRecord or Detailed) [default: summary] [possible values: summary, per-record, detailed]
+  -x, --threads <THREADS>      Threads to use for parallel processing
   -h, --help                   Print help
   -V, --version                Print version
 

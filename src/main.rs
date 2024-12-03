@@ -42,7 +42,7 @@ struct Args {
     input: String,
 
     /// Threads to use for parallel processing
-    #[arg(short, long)]
+    #[arg(short = 'x', long)]
     threads: Option<usize>,
 }
 
