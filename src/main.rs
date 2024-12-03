@@ -5,6 +5,7 @@ use flate2::Compression;
 use std::io::{BufReader, BufRead};
 use std::fs::OpenOptions;
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -14,6 +15,7 @@ use std::path::Path;
 use std::time::Instant;
 use smitten::{Identifier, IDVersion};
 use bio::io::fasta;
+use regex::Regex;
 
 /// Command-line arguments
 #[derive(Parser, Debug)]
@@ -31,13 +33,17 @@ struct Args {
     #[arg(short, long, default_value = "")]
     output: String,
 
-    /// Log level (Summary or Detailed)
+    /// Log level (Summary, PerRecord or Detailed)
     #[arg(short, long, default_value = "summary")]
     log_level: LogLevel,
 
     /// Input file path (Fasta or Stockholm format)
     #[arg()]
     input: String,
+
+    /// Threads to use for parallel processing
+    #[arg(short, long)]
+    threads: Option<usize>,
 }
 
 // Define a structure to store parsed ID components and sequences
@@ -71,9 +77,10 @@ impl SequenceRecord {
     }
 }
 
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum, PartialEq)]
 enum LogLevel {
     Summary,
+    PerRecord,
     Detailed,
 }
 
@@ -84,6 +91,18 @@ fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Ve
     let mut current_record: HashMap<String, String> = HashMap::new();
     let mut metadata: Vec<String> = Vec::new();
 
+    // For summary stats
+    let mut combined_status_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_seq_records = 0;
+
+    // Regex to match the ID/ACC lines
+    let re_id = Regex::new(r"^#=GF ID\s+(.+)$").unwrap();
+    let re_ac = Regex::new(r"^#=GF AC\s+(.+)$").unwrap();
+
+
+    let mut ident = String::new();
+    let mut accession = String::new();
+    let mut record_number = 1;
     for line in reader.lines() {
         let line = line?;
 
@@ -92,13 +111,31 @@ fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Ve
         }
 
         if line.starts_with("#") {
-            metadata.push(line);
+            metadata.push(line.clone());
+            if re_id.is_match(&line) {
+                ident = re_id.captures(&line).unwrap().get(1).unwrap().as_str().to_string();
+            } else if re_ac.is_match(&line) {
+                accession = re_ac.captures(&line).unwrap().get(1).unwrap().as_str().to_string();
+            }
             continue;
         }
 
         if line.starts_with("//") {
-            process_stockholm_record(&mut current_record, &metadata, genome_map, output_path, is_gzip, &log_level, map_seqs);
+            let label = if !accession.is_empty() {
+                accession.clone()
+            } else if !ident.is_empty() { 
+                ident.clone()
+            }else {
+                format!("record_{}", record_number)
+            };
+            //println!("Processing record: {}", label);
+            let (rec_seq_count, rec_status_counts) = process_stockholm_record(&mut current_record, &metadata, genome_map, output_path, is_gzip, &log_level, map_seqs, label);
+            for (key, value) in rec_status_counts {
+                *combined_status_counts.entry(key.clone()).or_insert(0) += value; 
+            }  
+            total_seq_records += rec_seq_count;
             current_record.clear();
+            record_number += 1;
         } else {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() == 2 {
@@ -108,18 +145,38 @@ fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Ve
         }
     }
 
-    // Process any remaining record
     if !current_record.is_empty() {
-        process_stockholm_record(
-            &mut current_record,
-            &metadata,
-            genome_map,
-            output_path,
-            is_gzip,
-            &log_level,
-            map_seqs,
-        );
+        panic!("Incomplete record found in Stockholm file");
     }
+
+    // Output summary stats
+    println!("-------------------------------------------------");
+    println!("Summary for {}:", file_path);
+    println!("  Total Sequences: {}", total_seq_records);
+    if combined_status_counts.get("valid").is_some() {
+        println!("     Accurate Coordinates: {}", combined_status_counts.get("valid").unwrap());
+    }else {
+        println!("     Accurate Coordinates: 0");
+    }
+    let mut repaired_total = 0;
+    for (fix_type, count) in combined_status_counts.iter() {
+        if fix_type != "valid" && fix_type != "invalid" {
+            repaired_total += count;
+        }
+    }
+    println!("     Repaired Coordinates: {}", repaired_total);
+    for (fix_type, count) in combined_status_counts.iter() {
+        if fix_type == "valid" || fix_type == "invalid" {
+            continue;
+        }
+        println!("        {}: {}", fix_type, count);
+    }
+    if combined_status_counts.get("invalid").is_some() {
+        println!("     Invalid Coordinates: {}", combined_status_counts.get("invalid").unwrap());
+    }else {
+        println!("     Invalid Coordinates: 0");
+    }
+
 
     Ok(())
 }
@@ -133,7 +190,8 @@ fn process_stockholm_record(
     is_gzip: bool,
     log_level: &LogLevel,
     map_seqs: bool,
-) {
+    label: String,
+) -> (usize, HashMap<String, usize>){
     let mut records = Vec::new();
 
     for (name, seq) in current_record.drain() {
@@ -171,20 +229,27 @@ fn process_stockholm_record(
         boyer_moore_search_with_validation(&mut records, genome_map, false);
     }
 
+    let total_records = records.len();
+    let mut status_counts = HashMap::new();
     for record in records.iter_mut() {
         if record.validated.is_none() {
             record.validated = Some("invalid".to_string());
         }
+        *status_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
     }
 
     // Log what we did
-    output_results(&records, log_level.clone());
+    if *log_level == LogLevel::PerRecord {
+        output_results(&records, log_level.clone(), label.clone());
+    }
 
     // Write the output in append mode
 
     if ! output_path.is_empty() {
         write_stockholm_output(&records, metadata, output_path, is_gzip, true).expect("Failed to write Stockholm output");
     }
+
+    (total_records, status_counts)
 }
 
 fn write_stockholm_output(
@@ -328,7 +393,6 @@ fn validate_sequences(
             None => continue, // Skip if the sequence ID is not found in the genome
         };
 
-       
         // Full-length sequences ( no range specified)
         if record.start.is_none() {
             // Is it the same as the database sequence?
@@ -369,39 +433,42 @@ fn validate_sequences(
         let mut located = false;
 
         //println!("  Working on start {} and end {}", start, end);
-        //println!("  Working on fasta_sequence {:?}", fasta_sequence);
         //println!("  Working on genome_sequence {:?}", genome_sequence[start..end].to_vec());
+        //println!("  Working on fasta_sequence {:?}", fasta_sequence);
+        //println!("  Working on REV fasta_sequence {:?}", rev_complement);
 
-        // 1. Direct match on same strand
+        // 1. Look for direct matches (either orientation)
         if start < genome_sequence.len() && end <= genome_sequence.len() {
+            let mut direct_match_orient: Option<char> = None;
+            // Direct match on fwd strand
             if &genome_sequence[start..end] == fasta_sequence {
-                located = true;
-                if record.orient != Some('+') {
-                    validation_str.push_str("_orient");
-                    record.orient = Some('-');
-                }
-                if debug_mode {
-                    println!("Direct match validated for: {:?}", record);
-                }
+                direct_match_orient = Some('+');
+            // Direct match on rev strand
             }
-        }
-
-        // 2. Reverse complement match on opposite strand
-        if !located && start < genome_sequence.len() && end <= genome_sequence.len() {
             if &genome_sequence[start..end] == &rev_complement {
-                located = true;
-                if record.orient == Some('+') {
-                    validation_str.push_str("_orient");
-                    record.orient = Some('-');
+                if direct_match_orient.is_none() {
+                    direct_match_orient = Some('-');
+                }else {
+                    // Both orientations match, so we can't determine the correct orientation
+                    direct_match_orient = Some('B');
                 }
-                if debug_mode {
-                    println!("Reverse complement validated for: {:?}", record);
+            }
+            if direct_match_orient.is_some() {
+                located = true;
+                if direct_match_orient == Some('B') || direct_match_orient == record.orient {
+                    if debug_mode {
+                        println!("Direct match validated for: {:?}", record);
+                    }
+                } else
+                {
+                    validation_str.push_str("_orient");
+                    record.orient = direct_match_orient;
                 }
             }
         }
 
+        // 2. Shifted matches on both strands within +/-3bp range
         if !located {
-            // 3. Shifted matches on both strands within +/-3bp range
             let shifts: [isize; 6] = [-3, -2, -1, 1, 2, 3];
             let orig_len = end.saturating_sub(start);
             for shift in shifts.iter() {
@@ -476,7 +543,6 @@ fn reverse_complement(dna: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-
 fn load_and_parse_fasta(fasta_path: &str) -> Vec<SequenceRecord> {
     let reader = fasta::Reader::from_file(fasta_path).expect("Could not read FASTA file");
     let mut parsed_records = Vec::new();
@@ -522,14 +588,10 @@ fn boyer_moore_search_with_validation(
     debug_mode: bool,
 ) {
     records.par_iter_mut().filter(|r| r.validated.is_none()).for_each(|record| {
-    //for record in records.iter_mut().filter(|r| r.validated.is_none()) {
         let pattern = &record.sequence;
         let rev_complement_pattern = reverse_complement(pattern);
         let mut found_positions = vec![];
         let mut found_sequence_id = None;
-        //let mut found_orientation: Option<char> = None;
-
-        //println!("Searching for pattern: {:?}", pattern);
 
         // Attempt search on the sequence specified by sequence_id
         if let Some(target_sequence) = genome_map.get(&record.sequence_id) {
@@ -647,9 +709,9 @@ fn boyer_moore_search(text: &[u8], pattern: &[u8]) -> Vec<usize> {
 
 
 // LogLevel options
-fn output_results(records: &[SequenceRecord], format: LogLevel) {
+fn output_results(records: &[SequenceRecord], format: LogLevel, label: String) {
     match format {
-        LogLevel::Summary => {
+        LogLevel::Summary | LogLevel::PerRecord => {
             let total_records = records.len();
             let mut fix_counts = HashMap::new();
             let mut fixed_count = 0;
@@ -663,7 +725,7 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
             let valid_count = records.iter().filter(|r| r.validated.as_deref() == Some("valid")).count();
             let invalid_count = records.iter().filter(|r| r.validated.as_deref() == Some("invalid")).count();
 
-            println!("Summary Report:");
+            println!("{}:", label);
             println!("  Total Sequences: {}", total_records);
             println!("     Accurate Coordinates: {}", valid_count);
             println!("     Repaired Coordinates: {}", fixed_count);
@@ -681,9 +743,12 @@ fn output_results(records: &[SequenceRecord], format: LogLevel) {
     }
 }
 
+
 fn main() {
     let args = Args::parse();
     let debug_mode = false;
+
+    println!("##\n## DisCoord Version {}\n##", env!("CARGO_PKG_VERSION"));
 
     // Check if the output file already exists
     if !args.output.is_empty() && Path::new(&args.output).exists() {
@@ -691,8 +756,20 @@ fn main() {
         std::process::exit(1); // Exit the program to avoid overwriting
     }
 
+    if let Some(n) = args.threads {
+        ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .expect("Failed to build global thread pool");
+        println!("## Threads: {}", n);
+    } else {
+        println!("## Threads: all available");
+    }
+
     let mut start = Instant::now();
     let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect format and compression");
+    println!("## File: {}, Format: {}, Compression: {}", &args.input, format, if is_gzip { "Gzip" } else { "None" });
+    println!("## Reference: {}", &args.twobit);
     let genome_map = load_genome_from_2bit_parallel(&args.twobit).expect("Failed to load genome");
     let loading_duration = start.elapsed(); // Get the elapsed time
 
@@ -711,7 +788,7 @@ fn main() {
                 record.validated = Some("invalid".to_string());
             }
         }
-        output_results(&records, args.log_level);
+        output_results(&records, args.log_level, format!("Summary for {}",args.input));
         if ! args.output.is_empty() {
             write_fasta_output(&records, &args.output, is_gzip, false).expect("Failed to write output");
         }
@@ -726,7 +803,6 @@ fn main() {
     println!("  Loading sequences: {:?} s", loading_duration);
     println!("         Validation: {:?} s", validation_duration);
 }
-
 
 
 fn load_genome_from_2bit_parallel(path: &str) -> io::Result<HashMap<String, Vec<u8>>> {
@@ -908,14 +984,15 @@ fn load_genome_from_2bit_parallel(path: &str) -> io::Result<HashMap<String, Vec<
                 }
             }
 
+            // In this application we do not want to lowercase any bases
             // Apply mask blocks (convert to lowercase for masked regions)
-            for (&start, &size) in mask_block_starts.iter().zip(mask_block_sizes.iter()) {
-                for pos in start..(start + size) {
-                    if pos < genome.len() {
-                        genome[pos] = genome[pos].to_ascii_lowercase();
-                    }
-                }
-            }
+            //for (&start, &size) in mask_block_starts.iter().zip(mask_block_sizes.iter()) {
+            //    for pos in start..(start + size) {
+            //        if pos < genome.len() {
+            //            genome[pos] = genome[pos].to_ascii_lowercase();
+            //        }
+            //    }
+            //}
 
             // Return the sequence name and data
             (name, genome)

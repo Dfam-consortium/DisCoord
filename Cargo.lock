@@ -822,7 +822,7 @@ dependencies = [
 [[package]]
 name = "smitten"
 version = "0.1.0"
-source = "git+https://github.com/Dfam-consortium/Smitten.git?tag=v1.0.0-alpha#caadb03da271d47459b99cd4eef4a41e13f5fdd6"
+source = "git+https://github.com/Dfam-consortium/Smitten.git#4ec75d2c4ba7b25292e2bb519102102f43f6c284"
 dependencies = [
  "regex",
 ]

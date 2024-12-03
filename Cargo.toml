@@ -10,7 +10,8 @@ name = "discoord"
 path = "src/main.rs"
 
 [dependencies]
-smitten = { git = "https://github.com/Dfam-consortium/Smitten.git", tag = "v1.0.0-alpha" }
+#smitten = { git = "https://github.com/Dfam-consortium/Smitten.git", tag = "v1.0.0-alpha" }
+smitten = { git = "https://github.com/Dfam-consortium/Smitten.git" }
 clap = { version = "4", features = ["derive"] }
 regex = "1.11.1"
 flate2 = "1.0"
