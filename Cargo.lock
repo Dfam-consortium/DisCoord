@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "DisCoord"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "bio",
  "clap",
@@ -832,7 +832,7 @@ dependencies = [
 [[package]]
 name = "smitten"
 version = "0.1.0"
-source = "git+https://github.com/Dfam-consortium/Smitten.git#4ec75d2c4ba7b25292e2bb519102102f43f6c284"
+source = "git+https://github.com/Dfam-consortium/Smitten.git#1d2faac318d9fae293d7e78163c8dabd99b4e9a2"
 dependencies = [
  "regex",
 ]

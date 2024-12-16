@@ -30,15 +30,16 @@ struct Args {
     #[arg(short, long, default_value = "false")]
     map_sequences: bool,
 
+    // TODO: Change this to Option<String>
     /// Optional output file path
-    #[arg(short, long, default_value = "")]
-    output: String,
+    #[arg(short, long)]
+    output: Option<String>,
 
     /// Log level (Summary, PerRecord or Detailed)
     #[arg(short, long, default_value = "summary")]
     log_level: LogLevel,
 
-    /// Input file path (Fasta or Stockholm format)
+    /// Input file path (Fasta, Stockholm or Tab/Comma Delimited file)
     #[arg()]
     input: String,
 
@@ -86,7 +87,7 @@ enum LogLevel {
 }
 
 
-fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Vec<u8>>, output_path: &str, is_gzip: bool, log_level: LogLevel, map_seqs: bool) -> io::Result<()> {
+fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Vec<u8>>, output_path: &Option<String>, is_gzip: bool, log_level: LogLevel, map_seqs: bool) -> io::Result<()> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
     let mut current_record: HashMap<String, String> = HashMap::new();
@@ -187,7 +188,7 @@ fn process_stockholm_record(
     current_record: &mut HashMap<String, String>,
     metadata: &[String],
     genome_map: &HashMap<String, Vec<u8>>,
-    output_path: &str,
+    output_path: &Option<String>, 
     is_gzip: bool,
     log_level: &LogLevel,
     map_seqs: bool,
@@ -196,7 +197,7 @@ fn process_stockholm_record(
     let mut records = Vec::new();
 
     for (name, seq) in current_record.drain() {
-        let (v2_id, inferred_version) = Identifier::from_unknown_format(&name, false)
+        let (v2_id, inferred_version) = Identifier::from_unknown_format(&name, false, true)
             .expect("Failed to convert ID to V2");
         let normalized_parsed_id = v2_id.normalize().unwrap();
 
@@ -240,14 +241,14 @@ fn process_stockholm_record(
     }
 
     // Log what we did
-    if *log_level == LogLevel::PerRecord {
+    if *log_level == LogLevel::PerRecord || *log_level == LogLevel::Detailed{
         output_results(&records, log_level.clone(), label.clone());
     }
 
     // Write the output in append mode
 
-    if ! output_path.is_empty() {
-        write_stockholm_output(&records, metadata, output_path, is_gzip, true).expect("Failed to write Stockholm output");
+    if let Some(outpath) = output_path {
+        write_stockholm_output(&records, metadata, outpath, is_gzip, true).expect("Failed to write Stockholm output");
     }
 
     (total_records, status_counts)
@@ -332,8 +333,64 @@ fn write_fasta_output(
     Ok(())
 }
 
+fn write_delimited_output(
+    records: &[SequenceRecord],
+    output_path: &str,
+    is_gzip: bool,
+    append: bool,
+    format: &str,
+) -> io::Result<()> {
+    // Determine the delimiter based on the format
+    let delimiter = match format {
+        "TabDelimited" => '\t',
+        "CommaDelimited" => ',',
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Unsupported format. Use 'TabDelimited' or 'CommaDelimited'.",
+            ))
+        }
+    };
 
-/// Detects format and compression type for input files (FASTA or Stockholm).
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .append(append)
+        .open(output_path)?;
+
+    let mut writer: Box<dyn Write> = if is_gzip {
+        Box::new(BufWriter::new(GzEncoder::new(file, Compression::default())))
+    } else {
+        Box::new(BufWriter::new(file))
+    };
+
+    for record in records {
+        // Extract components for delimited output
+        let assembly_id = record.assembly_id.clone().unwrap_or_default();
+        let sequence_id = record.sequence_id.clone();
+        let start = record.start.map(|v| v.to_string()).unwrap_or_default();
+        let end = record.end.map(|v| v.to_string()).unwrap_or_default();
+        let orient = record.orient.clone().unwrap_or_default();
+        let sequence = String::from_utf8_lossy(&record.sequence);
+
+        // Write the record as a single line with the selected delimiter
+        writeln!(
+            writer,
+            "{}{}{}{}{}{}{}{}{}{}{}",
+            assembly_id, delimiter,
+            sequence_id, delimiter,
+            start, delimiter,
+            end, delimiter,
+            orient, delimiter,
+            sequence
+        )?;
+    }
+
+    writer.flush()?;
+    Ok(())
+}
+
+
 fn detect_format_and_compression(path: &str) -> io::Result<(bool, &str)> {
     let file = File::open(path)?;
     let mut buf_reader = BufReader::new(file);
@@ -351,10 +408,25 @@ fn detect_format_and_compression(path: &str) -> io::Result<(bool, &str)> {
         Box::new(buf_reader)
     };
 
+    let mut magic_buffer = [0; 4];
+    reader.read_exact(&mut magic_buffer)?;
+    let magic_be = u32::from_be_bytes(magic_buffer);
+    let magic_le = u32::from_le_bytes(magic_buffer);
+    if magic_be == 0x1A412743 || magic_le == 0x1A412743 {
+        return Ok((is_gzip, "TwoBit"));
+    }
+
+    // Convert the magic bytes into a string
+    let mut first_line = String::from_utf8_lossy(&magic_buffer).to_string();
     let mut format = None;
     for _ in 0..15 {
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+
+        // If this is the first iteration, start with the prepended magic bytes
+        if !first_line.is_empty() {
+            line.push_str(&first_line);
+            first_line.clear(); // Clear after the first use
+        } else if reader.read_line(&mut line)? == 0 {
             break; // EOF reached
         }
 
@@ -365,10 +437,19 @@ fn detect_format_and_compression(path: &str) -> io::Result<(bool, &str)> {
 
         // Check for FASTA or Stockholm format based on line content
         if line.starts_with(">") {
-            format = Some("FASTA");
+            format = Some("Fasta");
             break;
         } else if line.starts_with("# STOCKHOLM 1.0") {
             format = Some("Stockholm");
+            break;
+        }
+
+        // Detect TabDelimited or CommaDelimited files
+        if line.contains('\t') && line.split('\t').count() > 1 {
+            format = Some("TabDelimited");
+            break;
+        } else if line.contains(',') && line.split(',').count() > 1 {
+            format = Some("CommaDelimited");
             break;
         }
     }
@@ -553,7 +634,7 @@ fn load_and_parse_fasta(fasta_path: &str) -> Vec<SequenceRecord> {
         let original_id = rec.id().to_string();
 
         // Convert the identifier to V2 format and capture inferred version
-        let (v2_id, inferred_version) = Identifier::from_unknown_format(&original_id, false).expect("Failed to convert ID to V2");
+        let (v2_id, inferred_version) = Identifier::from_unknown_format(&original_id, false, true).expect("Failed to convert ID to V2");
         //println!("Original ID: {}, V2 ID: {}, Inferred Version: {}", original_id, v2_id, inferred_version);
 
         // Parse and normalize the V2 identifier
@@ -575,11 +656,58 @@ fn load_and_parse_fasta(fasta_path: &str) -> Vec<SequenceRecord> {
             end: end,
             orient: orient,
             inferred_version: Some(inferred_version),  // Inferred version
-            sequence: rec.seq().to_owned(),
+            sequence: rec.seq().to_owned().to_ascii_uppercase(),
             aligned_seq: None,
             validated: None,
         });
     }
+    parsed_records
+}
+
+fn load_and_parse_delimited_file(svs_path: &str) -> Vec<SequenceRecord> {
+    // Open the file for reading
+    let file = File::open(Path::new(svs_path)).expect("Could not read SVS file");
+    let reader = io::BufReader::new(file);
+
+    let mut parsed_records = Vec::new();
+
+    // Process each line in the file
+    for line in reader.lines() {
+        let line = line.expect("Could not read line from SVS file");
+
+        // Split the line by either tab or comma
+        let fields: Vec<&str> = line.split(|c| c == '\t' || c == ',').collect();
+
+        // Ensure the line has the expected number of fields
+        if fields.len() < 6 {
+            panic!("Invalid record format: expected 6 fields, found {}", fields.len());
+        }
+
+        // Extract additional components if needed (redundant here as they're directly loaded)
+        let assembly_id = fields[0].to_string();
+        let sequence_id = fields[1].to_string();
+        let orient = fields.get(4).and_then(|field| field.chars().next());
+        let start = fields[2].parse::<u64>().ok(); 
+        let end = fields[3].parse::<u64>().ok();
+        let sequence = fields[5].as_bytes().to_vec();
+        // Generate an original ID (reconstruct from parts)
+        let original_id = format!("{}:{}:{}-{}:{}", assembly_id, sequence_id, start.unwrap_or(0), end.unwrap_or(0), orient.unwrap_or('+'));
+
+        // Store the parsed ID information along with the sequence and inferred version
+        parsed_records.push(SequenceRecord {
+            original_id: Some(original_id),
+            assembly_id: Some(assembly_id),
+            sequence_id,
+            start,
+            end,
+            orient,
+            inferred_version: None,
+            sequence,
+            aligned_seq: None,
+            validated: None,
+        });
+    }
+
     parsed_records
 }
 
@@ -627,9 +755,9 @@ fn boyer_moore_search_with_validation(
 
         // Process found positions
         if !found_positions.is_empty() {
-            let closest = if found_positions.len() == 1 {
+            let closest = if found_positions.len() == 1 || record.start.is_none() {
                 found_positions[0]
-            } else {
+            } else  {
                 // Find closest match to the start position in found_positions
                 found_positions
                     .iter()
@@ -744,56 +872,20 @@ fn output_results(records: &[SequenceRecord], format: LogLevel, label: String) {
     }
 }
 
-/// Enum to represent the type of sequence file.
-#[derive(Debug, PartialEq)]
-pub enum SequenceFileType {
-    Fasta,
-    TwoBit,
-    Unknown,
-}
-
-/// Determines the type of a sequence file by inspecting its signature.
-///
-/// # Arguments
-/// * `path` - Path to the sequence file.
-///
-/// # Returns
-/// A `Result` containing the detected `SequenceFileType`.
-pub fn determine_sequence_file_type(path: &str) -> io::Result<SequenceFileType> {
-    let mut file = File::open(path)?;
-    let mut buffer = [0; 4];
-
-    // Step 1: Read the first 4 bytes
-    file.read_exact(&mut buffer)?;
-
-    // Step 2: Check for 2bit magic number
-    let magic_be = u32::from_be_bytes(buffer);
-    let magic_le = u32::from_le_bytes(buffer);
-    if magic_be == 0x1A412743 || magic_le == 0x1A412743 {
-        return Ok(SequenceFileType::TwoBit);
-    }
-
-    // Step 3: Check if the file starts with '>' (FASTA file)
-    let mut file = BufReader::new(file);
-    file.read_exact(&mut buffer[..1])?; // Read the first byte only
-    if buffer[0] == b'>' {
-        return Ok(SequenceFileType::Fasta);
-    }
-
-    // If neither match, return Unknown
-    Ok(SequenceFileType::Unknown)
-}
-
 fn main() {
     let args = Args::parse();
     let debug_mode = false;
 
     println!("##\n## DisCoord Version {}\n##", env!("CARGO_PKG_VERSION"));
 
-    // Check if the output file already exists
-    if !args.output.is_empty() && Path::new(&args.output).exists() {
-        eprintln!("Error: The output file '{}' already exists. Please specify a different filename.", &args.output);
-        std::process::exit(1); // Exit the program to avoid overwriting
+    if let Some(output_file) = &args.output {
+        if Path::new(output_file).exists() {
+            eprintln!(
+                "Error: The output file '{}' already exists. Please specify a different filename.",
+                output_file
+            );
+            std::process::exit(1);
+        }
     }
 
     if let Some(n) = args.threads {
@@ -807,14 +899,15 @@ fn main() {
     }
 
     let mut start = Instant::now();
-    let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect format and compression");
+    let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect input format and compression");
     println!("## File: {}, Format: {}, Compression: {}", &args.input, format, if is_gzip { "Gzip" } else { "None" });
 
-    let ref_file_type = determine_sequence_file_type(&args.reference).expect("Failed to determine reference file type");
-    println!("## Reference: {}, format: {:?}", &args.reference, ref_file_type);
-    let genome_map = if ref_file_type == SequenceFileType::TwoBit {
+    let (ref_is_gzip, ref_format) = detect_format_and_compression(&args.reference).expect("Failed to detect reference format and compression");
+    println!("## Reference: {}, format: {}, Compression: {}", &args.reference, ref_format, if ref_is_gzip { "Gzip" } else { "None" });
+    let genome_map = if ref_format == "TwoBit" {
         load_genome_from_2bit_parallel(&args.reference).expect("Failed to load genome")
     } else {
+        // TODO: Support compressed fasta files
         load_genome_from_fasta_parallel(&args.reference).expect("Failed to load genome")
     };
 
@@ -823,7 +916,7 @@ fn main() {
     // TODO: we should probably flag duplicate coordinates following fixes
    
     start = Instant::now();
-    if  format == "FASTA" {
+    if  format == "Fasta" {
         let mut records = load_and_parse_fasta(&args.input);
         validate_sequences(&mut records, &genome_map, false);
         // Run Boyer-Moore search on unvalidated records
@@ -836,11 +929,27 @@ fn main() {
             }
         }
         output_results(&records, args.log_level, format!("Summary for {}",args.input));
-        if ! args.output.is_empty() {
-            write_fasta_output(&records, &args.output, is_gzip, false).expect("Failed to write output");
+        if let Some(output_file) = &args.output {
+            write_fasta_output(&records, output_file, is_gzip, false).expect("Failed to write output");
         }
     } else if format == "Stockholm" {
         parse_and_validate_stockholm(&args.input, &genome_map, &args.output, is_gzip, args.log_level, args.map_sequences).expect("Failed to parse Stockholm file");
+    } else if format == "TabDelimited" || format == "CommaDelimited" {
+        let mut records = load_and_parse_delimited_file(&args.input);
+        validate_sequences(&mut records, &genome_map, false);
+        // Run Boyer-Moore search on unvalidated records
+        if args.map_sequences {
+            boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
+        }
+        for record in records.iter_mut() {
+            if record.validated.is_none() {
+                record.validated = Some("invalid".to_string());
+            }
+        }
+        output_results(&records, args.log_level, format!("Summary for {}",args.input));
+        if let Some(output_file) = &args.output {
+            write_delimited_output(&records, output_file, is_gzip, false, format).expect("Failed to write output");
+        }
     } else {
         panic!("Unsupported format");
     }
@@ -863,7 +972,7 @@ pub fn load_genome_from_fasta_parallel(path: &str) -> io::Result<HashMap<String,
         .map(|result| {
             let record = result.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             let name = record.id().to_string(); // Sequence ID
-            let sequence = record.seq().to_vec(); // Sequence data
+            let sequence = record.seq().to_ascii_uppercase().to_vec(); // Sequence data
             Ok((name, sequence))
         })
         .collect::<Result<_, io::Error>>()?;

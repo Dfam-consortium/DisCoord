@@ -40,15 +40,15 @@ the start and end coordinates (100-200 a one-based, fully-closed interval) and t
 
 Command-line arguments
 
-Usage: discoord [OPTIONS] --twobit <TWOBIT> <INPUT>
+Usage: discoord [OPTIONS] --reference <REFERENCE> --output <OUTPUT> <INPUT>
 
 Arguments:
-  <INPUT>  Input file path (Fasta or Stockholm format)
+  <INPUT>  Input file path (Fasta, Stockholm or Tab/Comma Delimited file)
 
 Options:
   -r, --reference <REFERENCE>  Path to the reference sequence file [twobit, or fasta]
   -m, --map-sequences          Enable mapping (Boyer-Moore) for invalid identifiers
-  -o, --output <OUTPUT>        Optional output file path [default: ]
+  -o, --output <OUTPUT>        Optional output file path
   -l, --log-level <LOG_LEVEL>  Log level (Summary, PerRecord or Detailed) [default: summary] [possible values: summary, per-record, detailed]
   -x, --threads <THREADS>      Threads to use for parallel processing
   -h, --help                   Print help
@@ -73,6 +73,18 @@ or using a FASTA reference rather than UCSC 2bit format:
 
 ```
 
+### Delimited Format
+
+DisCoord can read tab or comma delimited files with the following format:
+
+```
+assembly_id: An assembly/reference identifier [or blank]
+sequence_id: A unique sequence identifier in the reference
+      start: The start coordinate (one-based) 
+        end: The end coordinate (one-based-fully-closed)
+   sequence: The sequence data
+```
+
 ### Smitten Format
 
 The Smitten format is a simple encoding for sequence identifiers that (as of V2) includes:
@@ -93,3 +105,6 @@ and indicates that the sequence is base pairs 5-10 of the sequence parent sequen
 The only reserved character is the colon (':') which is used to separate the assembly_id,
 sequence_id and subranges. 
 
+### TODO
+- Add support for file globbing for a set of input files against a reference
+- Setup a quiet mode to return overall status with a return code
