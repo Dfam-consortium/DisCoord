@@ -426,7 +426,8 @@ fn detect_format_and_compression(path: &str) -> io::Result<(bool, &str)> {
         if !first_line.is_empty() {
             line.push_str(&first_line);
             first_line.clear(); // Clear after the first use
-        } else if reader.read_line(&mut line)? == 0 {
+        } 
+        if reader.read_line(&mut line)? == 0 {
             break; // EOF reached
         }
 
@@ -878,15 +879,7 @@ fn main() {
 
     println!("##\n## DisCoord Version {}\n##", env!("CARGO_PKG_VERSION"));
 
-    if let Some(output_file) = &args.output {
-        if Path::new(output_file).exists() {
-            eprintln!(
-                "Error: The output file '{}' already exists. Please specify a different filename.",
-                output_file
-            );
-            std::process::exit(1);
-        }
-    }
+    let output_file = &args.output;
 
     if let Some(n) = args.threads {
         ThreadPoolBuilder::new()
