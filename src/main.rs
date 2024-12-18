@@ -17,6 +17,8 @@ use smitten::{Identifier, IDVersion};
 use bio::io::fasta;
 use regex::Regex;
 use memmap2::Mmap;
+use std::fs;
+
 
 /// Command-line arguments
 #[derive(Parser, Debug)]
@@ -879,7 +881,17 @@ fn main() {
 
     println!("##\n## DisCoord Version {}\n##", env!("CARGO_PKG_VERSION"));
 
-    let output_file = &args.output;
+    if let Some(output_file) = &args.output {
+        if Path::new(output_file).exists() {
+            if let Err(e) = fs::remove_file(output_file) {
+                eprintln!(
+                    "Error: Failed to delete the existing output file '{}': {}",
+                    output_file, e
+                );
+                std::process::exit(1);
+            } 
+        }
+    }
 
     if let Some(n) = args.threads {
         ThreadPoolBuilder::new()
