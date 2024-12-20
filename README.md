@@ -106,8 +106,6 @@ The only reserved character is the colon (':') which is used to separate the ass
 sequence_id and subranges. 
 
 ### TODO
-- Add support for file globbing for a set of input files against a reference
-- Make sure output sequence/id order reflects input order ( currently not guaranteed )
 - Add support for multiple references ( e.g --reference_dir ).  Using this option
   would require the use of the assembly identifier with sequences.  The program could
   batch all sequences with the same assembly identifier, and process them against the

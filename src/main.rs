@@ -18,6 +18,7 @@ use bio::io::fasta;
 use regex::Regex;
 use memmap2::Mmap;
 use std::fs;
+use std::process;
 
 
 /// Command-line arguments
@@ -32,18 +33,17 @@ struct Args {
     #[arg(short, long, default_value = "false")]
     map_sequences: bool,
 
-    // TODO: Change this to Option<String>
     /// Optional output file path
-    #[arg(short, long)]
-    output: Option<String>,
+    #[arg(short = 'o', long)]
+    output_fixed: bool,
 
     /// Log level (Summary, PerRecord or Detailed)
     #[arg(short, long, default_value = "summary")]
     log_level: LogLevel,
 
-    /// Input file path (Fasta, Stockholm or Tab/Comma Delimited file)
+    /// Input file paths (Fasta, Stockholm or Tab/Comma Delimited file)
     #[arg()]
-    input: String,
+    input: Vec<String>,
 
     /// Threads to use for parallel processing
     #[arg(short = 'x', long)]
@@ -89,7 +89,8 @@ enum LogLevel {
 }
 
 
-fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Vec<u8>>, output_path: &Option<String>, is_gzip: bool, log_level: LogLevel, map_seqs: bool) -> io::Result<()> {
+
+fn parse_and_validate_stockholm_old(file_path: &str, genome_map: &HashMap<String, Vec<u8>>, output_path: &Option<String>, is_gzip: bool, log_level: LogLevel, map_seqs: bool) -> io::Result<()> {
     let file = File::open(file_path)?;
     let reader = BufReader::new(file);
     let mut current_record: HashMap<String, String> = HashMap::new();
@@ -133,7 +134,7 @@ fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Ve
                 format!("record_{}", record_number)
             };
             //println!("Processing record: {}", label);
-            let (rec_seq_count, rec_status_counts) = process_stockholm_record(&mut current_record, &metadata, genome_map, output_path, is_gzip, &log_level, map_seqs, label);
+            let (rec_seq_count, rec_status_counts) = process_stockholm_record_old(&mut current_record, &metadata, genome_map, output_path, is_gzip, &log_level, map_seqs, label);
             for (key, value) in rec_status_counts {
                 *combined_status_counts.entry(key.clone()).or_insert(0) += value; 
             }  
@@ -185,8 +186,178 @@ fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Ve
     Ok(())
 }
 
-    
+fn parse_and_validate_stockholm(file_path: &str, genome_map: &HashMap<String, Vec<u8>>, output_path: &Option<String>, is_gzip: bool, log_level: LogLevel, map_seqs: bool) -> io::Result<()> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    let mut current_record: Vec<(String, String)> = Vec::new();
+    let mut metadata: Vec<String> = Vec::new();
+    let mut all_records: Vec<Vec<(String, String)>> = Vec::new();
+
+    // For summary stats
+    let mut combined_status_counts: HashMap<String, usize> = HashMap::new();
+    let mut total_seq_records = 0;
+
+    // Regex to match the ID/ACC lines
+    let re_id = Regex::new(r"^#=GF ID\s+(.+)$").unwrap();
+    let re_ac = Regex::new(r"^#=GF AC\s+(.+)$").unwrap();
+
+    let mut ident = String::new();
+    let mut accession = String::new();
+    let mut record_number = 1;
+    for line in reader.lines() {
+        let line = line?;
+
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.starts_with("#") {
+            metadata.push(line.clone());
+            if re_id.is_match(&line) {
+                ident = re_id.captures(&line).unwrap().get(1).unwrap().as_str().to_string();
+            } else if re_ac.is_match(&line) {
+                accession = re_ac.captures(&line).unwrap().get(1).unwrap().as_str().to_string();
+            }
+            continue;
+        }
+
+        if line.starts_with("//") {
+            let label = if !accession.is_empty() {
+                accession.clone()
+            } else if !ident.is_empty() {
+                ident.clone()
+            } else {
+                format!("record_{}", record_number)
+            };
+            // Store the current record before processing
+            all_records.push(current_record.clone());
+            current_record.clear();
+            record_number += 1;
+        } else {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                let (name, seq) = (parts[0].to_string(), parts[1].to_string());
+                current_record.push((name, seq));
+            }
+        }
+    }
+
+    if !current_record.is_empty() {
+        panic!("Incomplete record found in Stockholm file");
+    }
+
+    // Process all records in the order they were read
+    for record in all_records {
+        let (rec_seq_count, rec_status_counts) = process_stockholm_record(&mut record.clone(), &metadata, genome_map, output_path, is_gzip, &log_level, map_seqs, String::new());
+        for (key, value) in rec_status_counts {
+            *combined_status_counts.entry(key.clone()).or_insert(0) += value;
+        }
+        total_seq_records += rec_seq_count;
+    }
+
+    // Output summary stats
+    println!("-------------------------------------------------");
+    println!("Summary for {}:", file_path);
+    println!("  Total Sequences: {}", total_seq_records);
+    if combined_status_counts.get("valid").is_some() {
+        println!("     Accurate Coordinates: {}", combined_status_counts.get("valid").unwrap());
+    } else {
+        println!("     Accurate Coordinates: 0");
+    }
+    let mut repaired_total = 0;
+    for (fix_type, count) in combined_status_counts.iter() {
+        if fix_type != "valid" && fix_type != "invalid" {
+            repaired_total += count;
+        }
+    }
+    println!("     Repaired Coordinates: {}", repaired_total);
+    for (fix_type, count) in combined_status_counts.iter() {
+        if fix_type == "valid" || fix_type == "invalid" {
+            continue;
+        }
+        println!("        {}: {}", fix_type, count);
+    }
+    if combined_status_counts.get("invalid").is_some() {
+        println!("     Invalid Coordinates: {}", combined_status_counts.get("invalid").unwrap());
+    } else {
+        println!("     Invalid Coordinates: 0");
+    }
+
+    Ok(())
+}
+
 fn process_stockholm_record(
+    current_record: &mut Vec<(String, String)>,
+    metadata: &[String],
+    genome_map: &HashMap<String, Vec<u8>>,
+    output_path: &Option<String>, 
+    is_gzip: bool,
+    log_level: &LogLevel,
+    map_seqs: bool,
+    label: String,
+) -> (usize, HashMap<String, usize>){
+    let mut records = Vec::new();
+
+    for (name, seq) in current_record.drain(..) {
+        let (v2_id, inferred_version) = Identifier::from_unknown_format(&name, false, true)
+            .expect("Failed to convert ID to V2");
+        let normalized_parsed_id = v2_id.normalize().unwrap();
+
+        let assembly_id = normalized_parsed_id.assembly_id.clone();
+        let sequence_id = normalized_parsed_id.sequence_id.clone();
+        let orient = normalized_parsed_id.ranges.get(0).map(|r| r.orientation.clone());
+        let start = normalized_parsed_id.ranges.get(0).map(|r| r.start as u64);
+        let end = normalized_parsed_id.ranges.get(0).map(|r| r.end as u64);
+
+        let raw_seq: String = seq.chars().filter(|&c| c != '.' && c != '-').collect();
+
+        records.push(SequenceRecord {
+            original_id: Some(name),
+            assembly_id,
+            sequence_id,
+            start,
+            end,
+            orient,
+            inferred_version: Some(inferred_version),
+            sequence: raw_seq.into_bytes(),
+            aligned_seq: Some(seq.into_bytes()),
+            validated: None,
+        });
+    }
+
+    // Validate the records
+    validate_sequences(&mut records, genome_map, false);
+    
+    if map_seqs {
+        // Run Boyer-Moore search on unvalidated records
+        boyer_moore_search_with_validation(&mut records, genome_map, false);
+    }
+
+    let total_records = records.len();
+    let mut status_counts = HashMap::new();
+    for record in records.iter_mut() {
+        if record.validated.is_none() {
+            record.validated = Some("invalid".to_string());
+        }
+        *status_counts.entry(record.validated.clone().unwrap()).or_insert(0) += 1;
+    }
+
+    // Log what we did
+    if *log_level == LogLevel::PerRecord || *log_level == LogLevel::Detailed{
+        output_results(&records, log_level.clone(), label.clone());
+    }
+
+    // Write the output in append mode
+
+    if let Some(outpath) = output_path {
+        write_stockholm_output(&records, metadata, outpath, is_gzip, true).expect("Failed to write Stockholm output");
+    }
+
+    (total_records, status_counts)
+}
+
+    
+fn process_stockholm_record_old(
     current_record: &mut HashMap<String, String>,
     metadata: &[String],
     genome_map: &HashMap<String, Vec<u8>>,
@@ -875,23 +1046,13 @@ fn output_results(records: &[SequenceRecord], format: LogLevel, label: String) {
     }
 }
 
+
 fn main() {
     let args = Args::parse();
     let debug_mode = false;
+    let mut validation_failed = false;
 
     println!("##\n## DisCoord Version {}\n##", env!("CARGO_PKG_VERSION"));
-
-    if let Some(output_file) = &args.output {
-        if Path::new(output_file).exists() {
-            if let Err(e) = fs::remove_file(output_file) {
-                eprintln!(
-                    "Error: Failed to delete the existing output file '{}': {}",
-                    output_file, e
-                );
-                std::process::exit(1);
-            } 
-        }
-    }
 
     if let Some(n) = args.threads {
         ThreadPoolBuilder::new()
@@ -903,69 +1064,88 @@ fn main() {
         println!("## Threads: all available");
     }
 
-    let mut start = Instant::now();
-    let (is_gzip, format) = detect_format_and_compression(&args.input).expect("Failed to detect input format and compression");
-    println!("## File: {}, Format: {}, Compression: {}", &args.input, format, if is_gzip { "Gzip" } else { "None" });
-
     let (ref_is_gzip, ref_format) = detect_format_and_compression(&args.reference).expect("Failed to detect reference format and compression");
     println!("## Reference: {}, format: {}, Compression: {}", &args.reference, ref_format, if ref_is_gzip { "Gzip" } else { "None" });
     let genome_map = if ref_format == "TwoBit" {
         load_genome_from_2bit_parallel(&args.reference).expect("Failed to load genome")
     } else {
-        // TODO: Support compressed fasta files
         load_genome_from_fasta_parallel(&args.reference).expect("Failed to load genome")
     };
 
-    let loading_duration = start.elapsed(); // Get the elapsed time
+    for input_file in &args.input {
+        let mut start = Instant::now();
+        let (is_gzip, format) = detect_format_and_compression(input_file).expect("Failed to detect input format and compression");
+        println!("## File: {}, Format: {}, Compression: {}", input_file, format, if is_gzip { "Gzip" } else { "None" });
 
-    // TODO: we should probably flag duplicate coordinates following fixes
-   
-    start = Instant::now();
-    if  format == "Fasta" {
-        let mut records = load_and_parse_fasta(&args.input);
-        validate_sequences(&mut records, &genome_map, false);
-        // Run Boyer-Moore search on unvalidated records
-        if args.map_sequences {
-            boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
-        }
-        for record in records.iter_mut() {
-            if record.validated.is_none() {
-                record.validated = Some("invalid".to_string());
+        let loading_duration = start.elapsed(); // Get the elapsed time
+
+        // TODO: we should probably flag duplicate coordinates following fixes
+
+        start = Instant::now();
+        if format == "Fasta" {
+            let mut records = load_and_parse_fasta(input_file);
+            validate_sequences(&mut records, &genome_map, false);
+            // Run Boyer-Moore search on unvalidated records
+            if args.map_sequences {
+                boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
             }
-        }
-        output_results(&records, args.log_level, format!("Summary for {}",args.input));
-        if let Some(output_file) = &args.output {
-            write_fasta_output(&records, output_file, is_gzip, false).expect("Failed to write output");
-        }
-    } else if format == "Stockholm" {
-        parse_and_validate_stockholm(&args.input, &genome_map, &args.output, is_gzip, args.log_level, args.map_sequences).expect("Failed to parse Stockholm file");
-    } else if format == "TabDelimited" || format == "CommaDelimited" {
-        let mut records = load_and_parse_delimited_file(&args.input);
-        validate_sequences(&mut records, &genome_map, false);
-        // Run Boyer-Moore search on unvalidated records
-        if args.map_sequences {
-            boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
-        }
-        for record in records.iter_mut() {
-            if record.validated.is_none() {
-                record.validated = Some("invalid".to_string());
+            for record in records.iter_mut() {
+                if record.validated.is_none() {
+                    record.validated = Some("invalid".to_string());
+                }
+                if record.validated.as_ref().unwrap() == "invalid" {
+                    validation_failed = true;
+                }
             }
+            output_results(&records, args.log_level.clone(), format!("Summary for {}", input_file));
+            if args.output_fixed {
+                let output_file = format!("{}.discoord", input_file);
+                write_fasta_output(&records, &output_file, is_gzip, false).expect("Failed to write output");
+            }
+        } else if format == "Stockholm" {
+            if args.output_fixed {
+                let output_file = format!("{}.discoord", input_file);
+                parse_and_validate_stockholm(input_file, &genome_map, &Some(output_file), is_gzip, args.log_level.clone(), args.map_sequences).expect("Failed to parse Stockholm file");
+            } else {
+                parse_and_validate_stockholm(input_file, &genome_map, &None, is_gzip, args.log_level.clone(), args.map_sequences).expect("Failed to parse Stockholm file");
+            }
+        } else if format == "TabDelimited" || format == "CommaDelimited" {
+            let mut records = load_and_parse_delimited_file(input_file);
+            validate_sequences(&mut records, &genome_map, false);
+            // Run Boyer-Moore search on unvalidated records
+            if args.map_sequences {
+                boyer_moore_search_with_validation(&mut records, &genome_map, debug_mode);
+            }
+            for record in records.iter_mut() {
+                if record.validated.is_none() {
+                    record.validated = Some("invalid".to_string());
+                }
+                if record.validated.as_ref().unwrap() == "invalid" {
+                    validation_failed = true;
+                }
+            }
+            output_results(&records, args.log_level.clone(), format!("Summary for {}", input_file));
+            if args.output_fixed {
+                let output_file = format!("{}.discoord", input_file);
+                write_delimited_output(&records, &output_file, is_gzip, false, format).expect("Failed to write output");
+            }
+        } else {
+            panic!("Unsupported format");
         }
-        output_results(&records, args.log_level, format!("Summary for {}",args.input));
-        if let Some(output_file) = &args.output {
-            write_delimited_output(&records, output_file, is_gzip, false, format).expect("Failed to write output");
-        }
-    } else {
-        panic!("Unsupported format");
+        let validation_duration = start.elapsed(); // Get the elapsed time
+
+        println!("\nRuntime stats:");
+        println!("  Loading sequences: {:?} s", loading_duration);
+        println!("         Validation: {:?} s", validation_duration);
     }
-    let validation_duration = start.elapsed(); // Get the elapsed time
 
-    println!("\nRuntime stats:");
-    println!("  Loading sequences: {:?} s", loading_duration);
-    println!("         Validation: {:?} s", validation_duration);
+    // Return appropriate exit code based on validation results
+    if validation_failed {
+        process::exit(1);
+    } else {
+        process::exit(0);
+    }
 }
-
-
 pub fn load_genome_from_fasta_parallel(path: &str) -> io::Result<HashMap<String, Vec<u8>>> {
     // Open the FASTA file for reading
     let reader = fasta::Reader::from_file(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
