@@ -107,4 +107,11 @@ sequence_id and subranges.
 
 ### TODO
 - Add support for file globbing for a set of input files against a reference
+- Make sure output sequence/id order reflects input order ( currently not guaranteed )
+- Add support for multiple references ( e.g --reference_dir ).  Using this option
+  would require the use of the assembly identifier with sequences.  The program could
+  batch all sequences with the same assembly identifier, and process them against the
+  file with either reference_dir/a_id.fa or reference_dir/a_id.2bit whichever is present.
+  This option would also need a way to specify which assembly is validated against when
+  there is a sequence missing the asembly identifier.
 - Setup a quiet mode to return overall status with a return code
